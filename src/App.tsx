@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getGeminiApiKey } from './apiKey';
+import { decodeAudioFile, newAudioTrack, playClip } from './audioClips';
+import AudioClipLane from './AudioClipLane';
 import { SCALES, INSTRUMENT_PRESETS, GROUPS, playDrumVoice, isPercussion, scaleCatalogForAI, instrumentCatalogForAI } from './musicLibrary';
 import {
   Play, Pause, Square, Plus, Trash2, Volume2, VolumeX, Sliders,
   Sparkles, Wand2, Music, Code2, Layers, Check, Copy, RefreshCw,
   Scissors, Radio, Settings2, Activity, ChevronLeft, Disc, Cpu,
-  Mic2, Headphones, Gauge, HelpCircle, ArrowUpRight
+  Mic2, Headphones, Gauge, HelpCircle, ArrowUpRight, Upload
 } from 'lucide-react';
 
 
@@ -279,6 +281,12 @@ export default function App() {
   const analyserRef = useRef(null);
   const canvasRef = useRef(null);
 
+  // المقاطع الصوتية المستوردة: البيانات الصوتية + المصادر الشغالة حالياً
+  const audioBuffersRef = useRef(new Map());
+  const activeClipSourcesRef = useRef(new Map());
+  const fileInputRef = useRef(null);
+  const [isImporting, setIsImporting] = useState(false);
+
   // مراجع أحدث الحالات لاستخدامها داخل المؤقت الصوتي دون تقطيع
   const tracksRef = useRef(tracks);
   const scaleRef = useRef(selectedScale);
@@ -526,6 +534,58 @@ export default function App() {
     }
   }, []);
 
+  // تشغيل مقطع صوتي مستورد (يوقف التشغيل السابق لنفس المسار)
+  const startClip = useCallback((track, loopSeconds) => {
+    const ctx = audioCtxRef.current;
+    if (!ctx || !eqLowRef.current) return;
+    const prev = activeClipSourcesRef.current.get(track.id);
+    if (prev) {
+      try { prev.stop(); } catch (e) { /* انتهى مسبقاً */ }
+    }
+    const src = playClip(ctx, track, audioBuffersRef.current, eqLowRef.current, ctx.currentTime, loopSeconds);
+    if (src) {
+      activeClipSourcesRef.current.set(track.id, src);
+      src.onended = () => {
+        if (activeClipSourcesRef.current.get(track.id) === src) activeClipSourcesRef.current.delete(track.id);
+      };
+    }
+  }, []);
+
+  const stopAllClips = useCallback(() => {
+    activeClipSourcesRef.current.forEach((src) => {
+      try { src.stop(); } catch (e) { /* انتهى مسبقاً */ }
+    });
+    activeClipSourcesRef.current.clear();
+  }, []);
+
+  // استيراد ملفات صوتية (MP3 / WAV / OGG / M4A ...)
+  const handleImportAudio = async (fileList) => {
+    const files = [...(fileList || [])].filter((f) => f.type.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|aac|flac|webm)$/i.test(f.name));
+    if (files.length === 0) return;
+    initAudioEngine();
+    setIsImporting(true);
+    const added = [];
+    for (const file of files) {
+      try {
+        const { buffer, peaks } = await decodeAudioFile(audioCtxRef.current, file);
+        const id = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        audioBuffersRef.current.set(id, { buffer, reversed: null });
+        added.push(newAudioTrack(id, file.name, buffer.duration, peaks, tracksRef.current.length + added.length));
+      } catch (err) {
+        alert(`تعذر قراءة الملف "${file.name}". تأكد أنه ملف صوتي صالح.`);
+      }
+    }
+    setIsImporting(false);
+    if (added.length) {
+      setTracks((prev) => [...prev, ...added]);
+      setSelectedTrackId(added[added.length - 1].id);
+    }
+  };
+
+  const updateClip = (trackId, patch) => {
+    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, clip: { ...t.clip, ...patch } } : t)));
+  };
+
   // ==========================================
   // 5. حلقة التشغيل الزمني (Sequencer Loop) والراسم الطيفي
   // ==========================================
@@ -545,6 +605,10 @@ export default function App() {
 
         currentTracks.forEach((track) => {
           const shouldPlay = anySolo ? track.solo : !track.muted;
+          if (track.kind === 'audio') {
+            if (shouldPlay && track.clip.startStep === nextStep) startClip(track, stepDurationSec * 32);
+            return;
+          }
           if (shouldPlay && track.notes[nextStep] > 0) {
             triggerInstrumentNote(track, track.notes[nextStep], stepDurationSec);
           }
@@ -555,7 +619,12 @@ export default function App() {
     }, stepDurationMs);
 
     return () => clearInterval(interval);
-  }, [isPlaying, bpm, initAudioEngine, triggerInstrumentNote]);
+  }, [isPlaying, bpm, initAudioEngine, triggerInstrumentNote, startClip]);
+
+  // إيقاف المقاطع الصوتية عند إيقاف التشغيل
+  useEffect(() => {
+    if (!isPlaying) stopAllClips();
+  }, [isPlaying, stopAllClips]);
 
   // رسم الموجات الصوتية الحية في الهيدر (Live Audio Visualizer)
   useEffect(() => {
@@ -620,6 +689,7 @@ export default function App() {
     setTracks((prev) =>
       prev.map((track) => {
         if (targetTrackId !== 'all' && track.id !== targetTrackId) return track;
+        if (track.kind === 'audio') return track;
         const newNotes = [...track.notes];
         for (let i = regionStart; i <= regionEnd; i++) {
           if (isPercussion(track.instrument)) {
@@ -1109,6 +1179,25 @@ ${instrumentCatalogForAI()}
                       <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
                       <span>إضافة آلة جديدة</span>
                     </button>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isImporting}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 font-bold text-xs transition shadow-md shadow-sky-500/10"
+                    >
+                      <Upload className="w-3.5 h-3.5 stroke-[2.5]" />
+                      <span>{isImporting ? 'جاري التحميل...' : 'استيراد مقطع صوتي'}</span>
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => {
+                        handleImportAudio(e.target.files);
+                        e.target.value = '';
+                      }}
+                    />
                   </div>
                 </div>
 
@@ -1180,11 +1269,18 @@ ${instrumentCatalogForAI()}
                     <h3 className="text-sm font-bold">المسارات الصوتية والتوزيع الزمني (32 خطوة = 2 بار)</h3>
                   </div>
                   <span className="text-xs text-slate-400">
-                    انقر على أي مربع لتعديل النغمة يدوياً (1-8 درجات السلم)
+                    انقر على أي مربع لتعديل النغمة يدوياً (1-8 درجات السلم) — أو اسحب ملفاً صوتياً هنا لاستيراده
                   </span>
                 </div>
 
-                <div className="space-y-3 overflow-x-auto pb-2">
+                <div
+                  className="space-y-3 overflow-x-auto pb-2"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    handleImportAudio(e.dataTransfer.files);
+                  }}
+                >
                   {tracks.map((track) => {
                     const preset = INSTRUMENT_PRESETS[track.instrument] || INSTRUMENT_PRESETS.oud;
                     const isTrackSelected = selectedTrackId === track.id || selectedTrackId === 'all';
@@ -1208,12 +1304,14 @@ ${instrumentCatalogForAI()}
                                   className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shadow-inner"
                                   style={{ backgroundColor: `${track.color}25`, border: `1px solid ${track.color}60` }}
                                 >
-                                  {preset.icon}
+                                  {track.kind === 'audio' ? '🎙️' : preset.icon}
                                 </span>
-                                <div>
-                                  <h4 className="text-xs font-bold text-slate-100 leading-tight">{track.name}</h4>
+                                <div className="min-w-0">
+                                  <h4 className="text-xs font-bold text-slate-100 leading-tight truncate max-w-[9rem]" title={track.name}>{track.name}</h4>
                                   <span className="text-[10px] text-slate-400">
-                                    أوكتاف: {track.octave > 0 ? `+${track.octave}` : track.octave} | صدى: {Math.round(track.reverb * 100)}%
+                                    {track.kind === 'audio'
+                                      ? `مقطع صوتي | ${track.clip.length.toFixed(1)} ث`
+                                      : `أوكتاف: ${track.octave > 0 ? `+${track.octave}` : track.octave} | صدى: ${Math.round(track.reverb * 100)}%`}
                                   </span>
                                 </div>
                               </div>
@@ -1257,6 +1355,11 @@ ${instrumentCatalogForAI()}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setTracks((prev) => prev.filter((t) => t.id !== track.id));
+                                      if (track.kind === 'audio') {
+                                        const src = activeClipSourcesRef.current.get(track.id);
+                                        if (src) { try { src.stop(); } catch (err) { /* */ } }
+                                        audioBuffersRef.current.delete(track.id);
+                                      }
                                     }}
                                     className="p-1 text-slate-500 hover:text-rose-400 transition"
                                     title="حذف المسار"
@@ -1286,6 +1389,26 @@ ${instrumentCatalogForAI()}
                                   className="w-full accent-emerald-500 h-1 mt-1"
                                 />
                               </div>
+                              {track.kind === 'audio' ? (
+                              <div className="flex flex-col col-span-2">
+                                <span className="text-[10px] text-slate-400">التموضع (يمين / يسار)</span>
+                                <input
+                                  type="range"
+                                  min="-1"
+                                  max="1"
+                                  step="0.05"
+                                  value={track.pan}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    const val = Number(e.target.value);
+                                    setTracks((prev) =>
+                                      prev.map((t) => (t.id === track.id ? { ...t, pan: val } : t))
+                                    );
+                                  }}
+                                  className="w-full accent-sky-500 h-1 mt-1"
+                                />
+                              </div>
+                              ) : (<>
                               <div className="flex flex-col">
                                 <span className="text-[10px] text-slate-400">الصدى</span>
                                 <input
@@ -1320,10 +1443,27 @@ ${instrumentCatalogForAI()}
                                   <option value={1}>عالٍ (+1)</option>
                                 </select>
                               </div>
+                              </>)}
                             </div>
                           </div>
 
-                          {/* مصفوفة النوتات (32 خطوة مع تظليل منطقة التعديل الجزئي) */}
+                          {track.kind === 'audio' ? (
+                            <AudioClipLane
+                              track={track}
+                              stepSec={60 / bpm / 2}
+                              isPlaying={isPlaying}
+                              currentStep={currentStep}
+                              regionStart={regionStart}
+                              regionEnd={regionEnd}
+                              selected={selectedTrackId === track.id}
+                              onClipChange={(patch) => updateClip(track.id, patch)}
+                              onPreview={() => {
+                                initAudioEngine();
+                                startClip(track, (60 / bpm / 2) * 32);
+                              }}
+                            />
+                          ) : (
+                          /* مصفوفة النوتات (32 خطوة مع تظليل منطقة التعديل الجزئي) */
                           <div className="flex-1 grid grid-cols-16 sm:grid-cols-32 gap-1 items-center min-w-[640px]">
                             {track.notes.map((noteVal, stepIdx) => {
                               const isCurrentPlayhead = isPlaying && currentStep === stepIdx;
@@ -1369,6 +1509,7 @@ ${instrumentCatalogForAI()}
                               );
                             })}
                           </div>
+                          )}
                         </div>
                       </div>
                     );

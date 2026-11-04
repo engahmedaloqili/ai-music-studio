@@ -9,3 +9,6 @@ release/
 # ملفات مؤقتة خارج المشروع
 code_artifact.tsx
 gemini-code-*
+
+# نسخة مثبتة من التطبيق داخل مجلد المشروع
+AI Music Studio/
