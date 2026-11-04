@@ -57,7 +57,8 @@
     "publish": {
       "provider": "github",
       "owner": "engahmedaloqili",
-      "repo": "ai-music-studio"
+      "repo": "ai-music-studio",
+      "releaseType": "release"
     }
   },
   "allowScripts": {
