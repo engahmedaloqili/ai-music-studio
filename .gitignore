@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+.env
+.env.local
+*.log
+.DS_Store
+
+# ملفات مؤقتة خارج المشروع
+code_artifact.tsx
+gemini-code-*
