@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getGeminiApiKey } from './apiKey';
+import { SCALES, INSTRUMENT_PRESETS, GROUPS, playDrumVoice, isPercussion, scaleCatalogForAI, instrumentCatalogForAI } from './musicLibrary';
 import {
   Play, Pause, Square, Plus, Trash2, Volume2, VolumeX, Sliders,
   Sparkles, Wand2, Music, Code2, Layers, Check, Copy, RefreshCw,
@@ -7,51 +8,6 @@ import {
   Mic2, Headphones, Gauge, HelpCircle, ArrowUpRight
 } from 'lucide-react';
 
-// ==========================================
-// 1. التعريفات الموسيقية والمقامات (Scales & Maqamat)
-// ==========================================
-const SCALES = {
-  hijaz: {
-    name: 'مقام الحجاز (Hijaz)',
-    intervals: [0, 1, 4, 5, 7, 8, 10, 12],
-    baseFreq: 146.83, // D3
-    description: 'طابع شرقي أصيل وعاطفي'
-  },
-  bayati: {
-    name: 'مقام البياتي (Bayati)',
-    intervals: [0, 1.5, 3, 5, 7, 8, 10, 12], // 1.5 يمثل ربع التون تقريبياً في السلم
-    baseFreq: 146.83,
-    description: 'المقام الأكثر شيوعاً في الموسيقى العربية'
-  },
-  nahawand: {
-    name: 'مقام النهاوند (Nahawand / Minor)',
-    intervals: [0, 2, 3, 5, 7, 8, 11, 12],
-    baseFreq: 130.81, // C3
-    description: 'ناعم ودرامي قريب من السلم الصغير الغربي'
-  },
-  kurd: {
-    name: 'مقام الكرد (Kurd)',
-    intervals: [0, 1, 3, 5, 7, 8, 10, 12],
-    baseFreq: 146.83,
-    description: 'حالم ورومانسي وحديث'
-  },
-  rast: {
-    name: 'مقام الراست (Rast)',
-    intervals: [0, 2, 3.5, 5, 7, 9, 10.5, 12],
-    baseFreq: 130.81,
-    description: 'فخم، طربي، وأساس المقامات الشرقية'
-  }
-};
-
-const INSTRUMENT_PRESETS = {
-  oud: { name: 'عود شرقي (Oud)', color: '#f59e0b', icon: '🪕', type: 'plucked', octave: 0 },
-  qanun: { name: 'قانون (Qanun)', color: '#10b981', icon: '🎼', type: 'bright_plucked', octave: 1 },
-  nay: { name: 'ناي (Nay)', color: '#06b6d4', icon: '🪈', type: 'wind', octave: 1 },
-  strings: { name: 'وتريات عربية (Strings)', color: '#8b5cf6', icon: '🎻', type: 'pad', octave: 1 },
-  darbuka: { name: 'إيقاع دربكة (Percussion)', color: '#ec4899', icon: '🥁', type: 'percussion', octave: 0 },
-  bass: { name: 'باص عميق (Sub Bass)', color: '#3b82f6', icon: '🎸', type: 'bass', octave: -1 },
-  synth: { name: 'سينثسايزر حديث (Lead Synth)', color: '#f43f5e', icon: '🎹', type: 'synth', octave: 1 }
-};
 
 // التوزيع الافتراضي المبدئي (32 خطوة = 2 بار كاملين)
 const INITIAL_TRACKS = [
@@ -432,53 +388,11 @@ export default function App() {
       trackGain.connect(eqLowRef.current);
     }
 
-    // 1. محرك الإيقاع الشرقي والغربي (Darbuka / Percussion)
-    if (track.instrument === 'darbuka') {
-      if (noteValue === 1) {
-        // صوت "دم" (Doum - Deep Kick/Frame resonance)
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(145, now);
-        osc.frequency.exponentialRampToValueAtTime(48, now + 0.14);
-        g.gain.setValueAtTime(1.2, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-        osc.connect(g);
-        g.connect(trackGain);
-        osc.start(now);
-        osc.stop(now + 0.23);
-      } else if (noteValue >= 2 && noteValue <= 4) {
-        // صوت "تك" (Tak - Sharp metallic rim)
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(620, now);
-        osc.frequency.exponentialRampToValueAtTime(240, now + 0.06);
-        g.gain.setValueAtTime(0.8, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-        osc.connect(g);
-        g.connect(trackGain);
-        osc.start(now);
-        osc.stop(now + 0.09);
-      } else {
-        // صوت "كا / صاجات" (Ka / Crisp shaker)
-        const bufferSize = ctx.sampleRate * 0.05;
-        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-        const noise = ctx.createBufferSource();
-        noise.buffer = buffer;
-        const bandpass = ctx.createBiquadFilter();
-        bandpass.type = 'highpass';
-        bandpass.frequency.value = 5000;
-        const g = ctx.createGain();
-        g.gain.setValueAtTime(0.45, now);
-        g.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
-        noise.connect(bandpass);
-        bandpass.connect(g);
-        g.connect(trackGain);
-        noise.start(now);
-      }
+    // 1. آلات الإيقاع (دربكة، رق، درامز، كونغا...): كل درجة 1..8 تقابل صوتاً من kit
+    const preset = INSTRUMENT_PRESETS[track.instrument];
+    if (preset?.kit) {
+      const voice = preset.kit[(Math.round(noteValue) - 1) % preset.kit.length];
+      playDrumVoice(ctx, voice, trackGain, now);
       return;
     }
 
@@ -488,11 +402,44 @@ export default function App() {
     const osc2 = ctx.createOscillator();
     const filter = ctx.createBiquadFilter();
     const env = ctx.createGain();
+    const osc2Gain = ctx.createGain();
+    let lfo = null;
+    let noteEnd = 0;
 
     // صدى محاكي عبر إطالة الذيل الصوتي حسب نسبة الـ Reverb
     const reverbTail = (track.reverb + masteringRef.current.reverbMix) * 0.45;
 
-    if (track.instrument === 'oud') {
+    if (preset?.patch) {
+      // آلات معرّفة بالبيانات في musicLibrary.js (بيانو، كمان، ماريمبا...)
+      const p = preset.patch;
+      osc1.type = p.w1;
+      osc2.type = p.w2;
+      osc1.frequency.setValueAtTime(freq, now);
+      osc2.frequency.setValueAtTime(freq * (p.r2 ?? 1), now);
+      osc2Gain.gain.value = p.mix2 ?? 1;
+      filter.type = p.filter || 'lowpass';
+      const cutoff = p.fHz ?? freq * (p.fMul ?? 4);
+      filter.frequency.setValueAtTime(Math.min(cutoff, 18000), now);
+      if (p.fEndMul) {
+        filter.frequency.exponentialRampToValueAtTime(Math.min(freq * p.fEndMul, 18000), now + (p.fSweep ?? 0.3));
+      }
+      if (p.Q) filter.Q.value = p.Q;
+      const attack = p.attack ?? 0.01;
+      const decay = (p.decay ?? 0) + (p.decaySteps ?? 0) * stepDurationSec + reverbTail * (p.tail ?? 1);
+      env.gain.setValueAtTime(0.001, now);
+      env.gain.linearRampToValueAtTime(p.peak ?? 0.8, now + attack);
+      env.gain.exponentialRampToValueAtTime(0.001, now + attack + Math.max(decay, 0.05));
+      noteEnd = now + attack + decay + 0.1;
+      if (p.vib && p.vib.depth > 0) {
+        lfo = ctx.createOscillator();
+        const lfoGain = ctx.createGain();
+        lfo.frequency.value = p.vib.rate;
+        lfoGain.gain.value = freq * p.vib.depth;
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc1.frequency);
+        lfoGain.connect(osc2.frequency);
+      }
+    } else if (track.instrument === 'oud') {
       // صوت عود (وتر مقروص دافئ)
       osc1.type = 'sawtooth';
       osc2.type = 'triangle';
@@ -563,15 +510,20 @@ export default function App() {
     }
 
     osc1.connect(filter);
-    osc2.connect(filter);
+    osc2.connect(osc2Gain);
+    osc2Gain.connect(filter);
     filter.connect(env);
     env.connect(trackGain);
 
-    const stopTime = now + stepDurationSec * 2.2 + reverbTail + 0.1;
+    const stopTime = Math.max(now + stepDurationSec * 2.2 + reverbTail + 0.1, noteEnd);
     osc1.start(now);
     osc2.start(now);
     osc1.stop(stopTime);
     osc2.stop(stopTime);
+    if (lfo) {
+      lfo.start(now);
+      lfo.stop(stopTime);
+    }
   }, []);
 
   // ==========================================
@@ -670,7 +622,7 @@ export default function App() {
         if (targetTrackId !== 'all' && track.id !== targetTrackId) return track;
         const newNotes = [...track.notes];
         for (let i = regionStart; i <= regionEnd; i++) {
-          if (track.instrument === 'darbuka') {
+          if (isPercussion(track.instrument)) {
             if (style === 'energetic') {
               newNotes[i] = i % 2 === 0 ? 1 : i % 4 === 1 ? 5 : 3;
             } else if (style === 'sparse') {
@@ -702,7 +654,7 @@ export default function App() {
     const preset = INSTRUMENT_PRESETS[instKey];
     const newId = `track-${Date.now()}`;
     const generatedNotes = Array.from({ length: 32 }, (_, idx) => {
-      if (instKey === 'darbuka') return idx % 4 === 0 ? 1 : idx % 2 === 0 ? 3 : 0;
+      if (isPercussion(instKey)) return idx % 4 === 0 ? 1 : idx % 2 === 0 ? 3 : 0;
       if (instKey === 'nay') return idx % 4 === 0 ? ((idx / 4) % 6) + 1 : 0;
       return idx % 2 === 0 ? ((idx % 7) + 1) : 0;
     });
@@ -767,6 +719,14 @@ export default function App() {
 
 قم بتحليل طلب المستخدم باللغة العربية وأرجع كائن JSON مهيأ لتنفيذ التعديلات فوراً على المسارات والماسترينغ.
 يجب أن تحتوي مصفوفة pattern_for_region على أرقام من 0 إلى 8 (حيث 0 سكتة، ومن 1 إلى 8 درجات المقام الموسيقي، وفي الإيقاع 1=دم، 3=تك، 5=كا) بطول يغطي على الأقل 16 خطوة.
+في آلات الإيقاع: 1 = الصوت المنخفض (دم / كيك / كونغا منخفضة)، 3 = الصوت الحاد (تك / سنير / سلاب)، 5 = الصوت الخفيف (كا / هاي هات / شيكر).
+اختر المقام أو السلم والآلات المناسبة للنمط المطلوب (شرقي، غربي، لاتيني...) من القوائم التالية فقط، واستخدم المفتاح الإنجليزي قبل علامة =.
+
+المقامات والسلالم المتاحة:
+${scaleCatalogForAI()}
+
+الآلات المتاحة:
+${instrumentCatalogForAI()}
 `;
 
     const responseSchema = {
@@ -779,14 +739,14 @@ export default function App() {
         },
         new_scale: {
           type: "STRING",
-          description: "المقام الموسيقي: hijaz | bayati | nahawand | kurd | rast"
+          description: `المقام أو السلم الموسيقي، أحد: ${Object.keys(SCALES).join(" | ")}`
         },
         new_bpm: { type: "INTEGER", description: "سرعة الإيقاع بين 65 و 160" },
         region_start_step: { type: "INTEGER", description: "بداية منطقة التعديل (0 إلى 28)" },
         region_end_step: { type: "INTEGER", description: "نهاية منطقة التعديل (4 إلى 31)" },
         target_instrument: {
           type: "STRING",
-          description: "الآلة المستهدفة: oud | qanun | nay | strings | darbuka | bass | synth"
+          description: `الآلة المستهدفة، أحد: ${Object.keys(INSTRUMENT_PRESETS).join(" | ")}`
         },
         pattern_for_region: {
           type: "ARRAY",
@@ -1034,10 +994,16 @@ export default function App() {
                 onChange={(e) => setSelectedScale(e.target.value)}
                 className="bg-slate-900 text-xs font-medium text-slate-200 border border-slate-700 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500"
               >
-                {Object.entries(SCALES).map(([key, sc]) => (
-                  <option key={key} value={key}>
-                    {sc.name}
-                  </option>
+                {Object.entries(GROUPS).map(([groupKey, groupName]) => (
+                  <optgroup key={groupKey} label={groupName}>
+                    {Object.entries(SCALES)
+                      .filter(([, sc]) => sc.group === groupKey)
+                      .map(([key, sc]) => (
+                        <option key={key} value={key} title={sc.description}>
+                          {sc.name}
+                        </option>
+                      ))}
+                  </optgroup>
                 ))}
               </select>
             </div>
@@ -1741,7 +1707,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div
             dir="rtl"
-            className="bg-[#111827] border border-slate-700 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4"
+            className="bg-[#111827] border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[85vh] overflow-y-auto p-5 shadow-2xl space-y-4"
           >
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -1756,8 +1722,14 @@ export default function App() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {Object.entries(INSTRUMENT_PRESETS).map(([key, inst]) => (
+            {Object.entries(GROUPS).map(([groupKey, groupName]) => {
+              const items = Object.entries(INSTRUMENT_PRESETS).filter(([, inst]) => inst.group === groupKey);
+              if (items.length === 0) return null;
+              return (
+            <div key={groupKey} className="space-y-2">
+            <h4 className="text-xs font-bold text-emerald-400">{groupName}</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+              {items.map(([key, inst]) => (
                 <button
                   key={key}
                   onClick={() => handleAddInstrument(key)}
@@ -1771,11 +1743,14 @@ export default function App() {
                   </span>
                   <div>
                     <div className="text-xs font-bold text-slate-100">{inst.name}</div>
-                    <div className="text-[10px] text-slate-400">توليد مسار متناغم مع المقام</div>
+                    <div className="text-[10px] text-slate-400">{inst.kit ? 'مسار إيقاع' : 'توليد مسار متناغم مع المقام'}</div>
                   </div>
                 </button>
               ))}
             </div>
+            </div>
+              );
+            })}
           </div>
         </div>
       )}

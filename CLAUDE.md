@@ -4,6 +4,8 @@ DAW مبسط بالعربية (RTL) مع مقامات شرقية، يعمل كت
 
 ## البنية
 - `src/App.tsx` — كل واجهة الاستوديو (React + Tailwind v4 + Web Audio API). مكتوب كـ JS داخل ملف tsx؛ لا يوجد فحص أنواع (tsc) في البناء.
+- `src/musicLibrary.js` — كل المقامات/السلالم (SCALES) والآلات (INSTRUMENT_PRESETS) وأصوات الإيقاع (DRUM_VOICES)، مقسمة حسب GROUPS (شرقي/غربي/لاتيني/عالمي). الإضافة هنا تظهر تلقائياً في الواجهة وفي قوائم Gemini.
+  - آلة نغمية جديدة = عنصر مع `patch` (موجتان + فلتر + غلاف + اهتزاز). آلة إيقاع = عنصر مع `kit` (8 أصوات). الآلات الأصلية (oud, qanun, nay, strings, bass, synth) صوتها مبرمج يدوياً داخل `triggerInstrumentNote` في App.tsx.
 - `src/apiKey.js` — جلب مفتاح Gemini (env → localStorage → نافذة إدخال). لا تستخدم `window.prompt` لأنه لا يعمل في Electron.
 - `electron/main.cjs` — نافذة التطبيق + التحديث التلقائي عبر `electron-updater` من GitHub Releases.
 - `.github/workflows/release.yml` — يبني مثبّت ويندوز عند دفع وسم `v*`.
