@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { getGeminiApiKey } from './apiKey';
+import { getGeminiApiKey, getFalApiKey } from './apiKey';
+import { aceGenerate, aceRepaint, aceEdit, uploadAudio, buildAceTags } from './aceStep';
+import SongEditor from './SongEditor';
 import { decodeAudioFile, newAudioTrack, playClip } from './audioClips';
 import AudioClipLane from './AudioClipLane';
 import LyricsPanel from './LyricsPanel';
@@ -731,11 +733,139 @@ export default function App() {
     const id = `audio-${Date.now()}`;
     audioBuffersRef.current.set(id, { buffer });
     const track = newAudioTrack(id, `🎤 ${lyrics.title || 'أغنية'}`, buffer.duration, peaks, tracksRef.current.length);
+    track.clip.ace = { lyrics: lyricsForSinger(lyrics.text), tags: buildAceTags({ style, dialect: DIALECT_FOR_SINGER[lyrics.dialect], instruments, bpm }) };
     setTracks((prev) => [...prev, track]);
     return {
       url: URL.createObjectURL(blob),
       message: `✅ تم توليد الأغنية (${Math.round(buffer.duration)} ثانية) وانضافت كمسار صوتي في تبويب المسارات. تقدر تسمعها هنا أو تحفظها.`,
     };
+  };
+
+  // ==========================================
+  // محرر الأغنية بالذكاء (ACE-Step عبر fal.ai)
+  // ==========================================
+  const [aceHistory, setAceHistory] = useState({});
+  const previewSrcRef = useRef(null);
+  const songInstruments = () => [...new Set(
+    tracksRef.current
+      .filter((t) => t.kind !== 'audio')
+      .map((t) => INSTRUMENT_PRESETS[t.instrument]?.name.match(/\(([^)]+)\)/)?.[1] || t.name)
+  )].join(', ').toLowerCase();
+  const defaultAceTags = buildAceTags({
+    style: lyrics.style && /^[\x00-\x7F]*$/.test(lyrics.style) ? lyrics.style : 'emotional, melodic',
+    dialect: DIALECT_FOR_SINGER[lyrics.dialect],
+    instruments: songInstruments(),
+    bpm,
+  });
+
+  const stopPreview = () => {
+    try { previewSrcRef.current?.stop(); } catch (e) { /* */ }
+    previewSrcRef.current = null;
+  };
+  const handlePreviewRegion = (trackId, start, end) => {
+    initAudioEngine();
+    stopPreview();
+    const entry = audioBuffersRef.current.get(trackId);
+    const track = tracksRef.current.find((t) => t.id === trackId);
+    if (!entry || !track) return;
+    const ctx = audioCtxRef.current;
+    const src = ctx.createBufferSource();
+    src.buffer = entry.buffer;
+    const g = ctx.createGain();
+    g.gain.value = track.volume;
+    src.connect(g);
+    g.connect(eqLowRef.current);
+    src.start(ctx.currentTime, start, Math.max(0.05, end - start));
+    previewSrcRef.current = src;
+  };
+
+  // يرجع رابط الملف على fal (يرفعه إذا ما كان مرفوع)
+  const ensureSourceUrl = async (apiKey, track) => {
+    if (track.clip.ace?.url) return track.clip.ace.url;
+    const entry = audioBuffersRef.current.get(track.id);
+    const url = await uploadAudio(apiKey, entry.buffer);
+    setTracks((prev) => prev.map((t) => (t.id === track.id ? { ...t, clip: { ...t.clip, ace: { ...(t.clip.ace || {}), url } } } : t)));
+    return url;
+  };
+
+  // يستبدل صوت المسار بالنسخة الجديدة ويحفظ القديمة للتراجع
+  const replaceTrackAudio = async (trackId, blob, ace) => {
+    const { buffer, peaks } = await decodeAudioFile(audioCtxRef.current, blob);
+    const entry = audioBuffersRef.current.get(trackId);
+    const track = tracksRef.current.find((t) => t.id === trackId);
+    entry.history = entry.history || [];
+    entry.history.push({ buffer: entry.buffer, clip: track.clip });
+    if (entry.history.length > 10) entry.history.shift();
+    entry.buffer = buffer;
+    entry.cache = new Map();
+    setAceHistory((h) => ({ ...h, [trackId]: entry.history.length }));
+    setTracks((prev) => prev.map((t) => (t.id === trackId
+      ? { ...t, clip: { ...t.clip, duration: buffer.duration, length: buffer.duration, trimStart: 0, peaks, ace } }
+      : t)));
+    return buffer.duration;
+  };
+
+  const handleAceGenerate = async ({ tags, duration }) => {
+    const apiKey = await getFalApiKey();
+    if (!apiKey) throw new Error('لم يتم ضبط مفتاح fal.ai');
+    initAudioEngine();
+    const songLyrics = lyricsForSinger(lyrics.text);
+    const res = await aceGenerate(apiKey, { tags, lyrics: songLyrics, duration });
+    const { buffer, peaks } = await decodeAudioFile(audioCtxRef.current, res.blob);
+    const id = `audio-${Date.now()}`;
+    audioBuffersRef.current.set(id, { buffer });
+    const track = newAudioTrack(id, `🎤 ${lyrics.title || 'أغنية'} (ACE)`, buffer.duration, peaks, tracksRef.current.length);
+    track.clip.ace = { url: res.url, tags, lyrics: songLyrics, seed: res.seed };
+    setTracks((prev) => [...prev, track]);
+    return `✅ تم توليد الأغنية (${Math.round(buffer.duration)} ثانية). اسمعها، وإذا فيه جزء ما عجبك حدده على الموجة تحت وعدّله.`;
+  };
+
+  const handleAceRepaint = async (trackId, { start, end, lyrics: newLyrics, tags, variance }) => {
+    const apiKey = await getFalApiKey();
+    if (!apiKey) throw new Error('لم يتم ضبط مفتاح fal.ai');
+    initAudioEngine();
+    stopPreview();
+    const track = tracksRef.current.find((t) => t.id === trackId);
+    const audioUrl = await ensureSourceUrl(apiKey, track);
+    const res = await aceRepaint(apiKey, { audioUrl, tags, lyrics: newLyrics, start, end, variance });
+    await replaceTrackAudio(trackId, res.blob, { url: res.url, tags, lyrics: newLyrics, seed: res.seed });
+    const m = (x) => { const r = Math.round(x); return `${Math.floor(r / 60)}:${String(r % 60).padStart(2, '0')}`; };
+    return `✅ أعيد غناء الجزء من ${m(start)} إلى ${m(end)}، والباقي كما هو. اسمع الجزء، وإذا ما عجبك اضغط «تراجع» أو أعد المحاولة.`;
+  };
+
+  const handleAceEdit = async (trackId, { mode, lyrics: newLyrics, tags }) => {
+    const apiKey = await getFalApiKey();
+    if (!apiKey) throw new Error('لم يتم ضبط مفتاح fal.ai');
+    initAudioEngine();
+    stopPreview();
+    const track = tracksRef.current.find((t) => t.id === trackId);
+    const audioUrl = await ensureSourceUrl(apiKey, track);
+    const prev = track.clip.ace || {};
+    const res = await aceEdit(apiKey, {
+      audioUrl,
+      mode,
+      originalTags: prev.tags || tags,
+      originalLyrics: prev.lyrics || '',
+      originalSeed: prev.seed,
+      tags,
+      lyrics: newLyrics,
+    });
+    await replaceTrackAudio(trackId, res.blob, { url: res.url, tags, lyrics: newLyrics, seed: res.seed });
+    return mode === 'lyrics'
+      ? '✅ تغيّرت الكلمات مع الحفاظ على اللحن قدر الإمكان. إذا ما عجبتك اضغط «تراجع».'
+      : '✅ تمت إعادة التوزيع بالأسلوب الجديد. إذا ما عجبتك اضغط «تراجع».';
+  };
+
+  const handleAceUndo = (trackId) => {
+    const entry = audioBuffersRef.current.get(trackId);
+    const last = entry?.history?.pop();
+    if (!last) return 'ما فيه تعديل سابق للتراجع عنه.';
+    stopPreview();
+    entry.buffer = last.buffer;
+    entry.cache = new Map();
+    setAceHistory((h) => ({ ...h, [trackId]: entry.history.length }));
+    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, clip: last.clip } : t)));
+    return '↶ رجعت النسخة السابقة.';
   };
 
   const handleClearTrackLyrics = (trackId) =>
@@ -1316,6 +1446,20 @@ ${instrumentCatalogForAI()}
               onGenerateSong={handleGenerateSong}
               onLinkLine={handleLinkLine}
               onClearTrackLyrics={handleClearTrackLyrics}
+            />
+          )}
+          {activeTab === 'lyrics' && (
+            <SongEditor
+              songs={tracks.filter((t) => t.kind === 'audio')}
+              defaultTags={defaultAceTags}
+              defaultLyrics={lyricsForSinger(lyrics.text)}
+              historyCount={aceHistory}
+              onGenerate={handleAceGenerate}
+              onRepaint={handleAceRepaint}
+              onEdit={handleAceEdit}
+              onUndo={handleAceUndo}
+              onPreview={handlePreviewRegion}
+              onStopPreview={stopPreview}
             />
           )}
           

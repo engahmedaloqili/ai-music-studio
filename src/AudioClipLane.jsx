@@ -62,7 +62,7 @@ export default function AudioClipLane({
     e.stopPropagation();
     const lane = laneRef.current;
     if (!lane) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* */ }
     dragRef.current = { x: e.clientX, start: clip.startStep, stepPx: lane.clientWidth / 32 };
   };
   const onPointerMove = (e) => {
