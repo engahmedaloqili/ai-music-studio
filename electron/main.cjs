@@ -1,5 +1,5 @@
 // نقطة دخول تطبيق سطح المكتب (Electron)
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, shell, dialog, ipcMain } = require('electron');
 const path = require('path');
 
 // السماح بالمايكروفون فقط (للتسجيل الصوتي) ورفض أي صلاحيات أخرى
@@ -8,6 +8,22 @@ function setupPermissions() {
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
     const audioOnly = permission === 'media' && (!details.mediaTypes || details.mediaTypes.every((t) => t === 'audio'));
     callback(audioOnly);
+  });
+}
+
+// توليد الأغاني عبر Lyria من العملية الرئيسية (العنوان ثابت، والواجهة ترسل المفتاح والنص فقط)
+const LYRIA_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+function setupLyria() {
+  ipcMain.handle('lyria:generate', async (_e, { apiKey, model, prompt }) => {
+    if (typeof apiKey !== 'string' || typeof prompt !== 'string' || !/^lyria-[\w.-]+$/.test(model)) {
+      return { status: 400, body: JSON.stringify({ error: { message: 'invalid request' } }) };
+    }
+    const res = await fetch(LYRIA_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey, 'Api-Revision': '2026-05-20' },
+      body: JSON.stringify({ model, input: prompt }),
+    });
+    return { status: res.status, body: await res.text() };
   });
 }
 
@@ -23,6 +39,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -58,6 +75,7 @@ function setupAutoUpdate() {
 
 app.whenReady().then(() => {
   setupPermissions();
+  setupLyria();
   createWindow();
   setupAutoUpdate();
   app.on('activate', () => {

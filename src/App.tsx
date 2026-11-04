@@ -3,7 +3,8 @@ import { getGeminiApiKey } from './apiKey';
 import { decodeAudioFile, newAudioTrack, playClip } from './audioClips';
 import AudioClipLane from './AudioClipLane';
 import LyricsPanel from './LyricsPanel';
-import { loadLyrics, saveLyrics, syllabify, placeSyllables, applyComposedLine } from './lyrics';
+import { loadLyrics, saveLyrics, syllabify, placeSyllables, applyComposedLine, lyricsForSinger, DIALECTS } from './lyrics';
+import { generateSong, buildSongPrompt, DIALECT_FOR_SINGER } from './lyria';
 import { startRecording } from './recorder';
 import { getProcessedBuffer } from './audioClips';
 import { SCALES, INSTRUMENT_PRESETS, GROUPS, playDrumVoice, isPercussion, scaleCatalogForAI, instrumentCatalogForAI } from './musicLibrary';
@@ -705,6 +706,38 @@ export default function App() {
       : `✅ انربط ${result.placed} مقطع بمسار «${track.name}» ابتداءً من الخطوة ${regionStart + 1}.`;
   };
 
+  // تحويل الكلمات إلى أغنية مغنّاة عبر Lyria
+  const defaultSongStyle = `أغنية ${DIALECTS[lyrics.dialect]} عاطفية على ${SCALES[selectedScale]?.name}`;
+  const handleGenerateSong = async (model, style) => {
+    const apiKey = await getGeminiApiKey();
+    if (!apiKey) throw new Error('لم يتم ضبط مفتاح Gemini');
+    const instruments = [...new Set(
+      tracksRef.current
+        .filter((t) => t.kind !== 'audio')
+        .map((t) => INSTRUMENT_PRESETS[t.instrument]?.name.match(/\(([^)]+)\)/)?.[1] || t.name)
+    )].join(', ');
+    const prompt = buildSongPrompt({
+      title: lyrics.title,
+      dialect: DIALECT_FOR_SINGER[lyrics.dialect] || 'Arabic',
+      style,
+      scale: SCALES[selectedScale]?.name,
+      bpm,
+      instruments,
+      lyricsText: lyricsForSinger(lyrics.text),
+    });
+    const { blob } = await generateSong(apiKey, model, prompt);
+    initAudioEngine();
+    const { buffer, peaks } = await decodeAudioFile(audioCtxRef.current, blob);
+    const id = `audio-${Date.now()}`;
+    audioBuffersRef.current.set(id, { buffer });
+    const track = newAudioTrack(id, `🎤 ${lyrics.title || 'أغنية'}`, buffer.duration, peaks, tracksRef.current.length);
+    setTracks((prev) => [...prev, track]);
+    return {
+      url: URL.createObjectURL(blob),
+      message: `✅ تم توليد الأغنية (${Math.round(buffer.duration)} ثانية) وانضافت كمسار صوتي في تبويب المسارات. تقدر تسمعها هنا أو تحفظها.`,
+    };
+  };
+
   const handleClearTrackLyrics = (trackId) =>
     setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, lyrics: new Array(32).fill('') } : t)));
 
@@ -728,7 +761,11 @@ export default function App() {
         currentTracks.forEach((track) => {
           const shouldPlay = anySolo ? track.solo : !track.muted;
           if (track.kind === 'audio') {
-            if (shouldPlay && track.clip.startStep === nextStep) startClip(track, stepDurationSec * 32);
+            if (shouldPlay && track.clip.startStep === nextStep) {
+              // المقاطع الأطول من دورة المقطوعة (مثل أغنية كاملة) تكمل بدون إعادة
+              const isLong = track.clip.length / track.clip.rate > stepDurationSec * 32;
+              if (!(isLong && activeClipSourcesRef.current.has(track.id))) startClip(track, stepDurationSec * 32);
+            }
             return;
           }
           if (shouldPlay && track.notes[nextStep] > 0) {
@@ -1275,6 +1312,8 @@ ${instrumentCatalogForAI()}
               bpm={bpm}
               regionStart={regionStart}
               askGemini={askGeminiJSON}
+              defaultStyle={defaultSongStyle}
+              onGenerateSong={handleGenerateSong}
               onLinkLine={handleLinkLine}
               onClearTrackLyrics={handleClearTrackLyrics}
             />

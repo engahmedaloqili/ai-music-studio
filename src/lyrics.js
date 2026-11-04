@@ -1,17 +1,35 @@
 // ==========================================
-// الكلمات: الأقسام، تقطيع المقاطع، وربط الكلمات باللحن
-// lyrics = { title, topic, dialect, vocalTrackId, sections: [{ id, type, text }] }
+// الكلمات: نص واحد مقسّم بوسوم الأقسام مثل [المذهب] أو [Verse 2]
+// lyrics = { title, topic, dialect, vocalTrackId, style, text }
 // track.lyrics = مصفوفة 32 عنصر (مقطع لكل خطوة أو '')
 // ==========================================
 
+// اسم القسم بالعربي + الوسم الذي يفهمه Lyria + كلمات يُتعرّف بها على الوسم
 export const SECTION_TYPES = {
-  intro: 'مقدمة',
-  madhhab: 'المذهب (اللازمة)',
-  verse: 'كوبليه',
-  chorus: 'كورس / قرار',
-  bridge: 'جسر',
-  outro: 'قفلة',
+  intro: { name: 'مقدمة', lyria: 'Intro', keys: ['مقدمة', 'مقدمه', 'intro'] },
+  madhhab: { name: 'المذهب', lyria: 'Chorus', keys: ['مذهب', 'لازمة', 'لازمه', 'hook'] },
+  verse: { name: 'كوبليه', lyria: 'Verse', keys: ['كوبليه', 'كوبلية', 'مقطع', 'verse', 'couplet'] },
+  prechorus: { name: 'ما قبل الكورس', lyria: 'Pre-Chorus', keys: ['ما قبل', 'pre-chorus', 'prechorus', 'pre chorus'] },
+  chorus: { name: 'كورس', lyria: 'Chorus', keys: ['كورس', 'قرار', 'chorus', 'refrain'] },
+  bridge: { name: 'جسر', lyria: 'Bridge', keys: ['جسر', 'bridge'] },
+  outro: { name: 'قفلة', lyria: 'Outro', keys: ['قفلة', 'قفله', 'خاتمة', 'outro', 'ending'] },
 };
+
+export function detectType(tag) {
+  const t = tag.toLowerCase();
+  // ما قبل الكورس قبل الكورس حتى لا يلتبس
+  for (const k of ['prechorus', 'intro', 'outro', 'bridge', 'madhhab', 'chorus', 'verse']) {
+    if (SECTION_TYPES[k].keys.some((key) => t.includes(key))) return k;
+  }
+  return 'verse';
+}
+
+// الرقم أو الصفة الإضافية في الوسم مثل "2" أو "Final"
+function tagSuffix(tag) {
+  const num = tag.match(/\d+/);
+  const final = /final|أخير|الأخير|اخير/i.test(tag);
+  return [final ? 'الأخير' : '', num ? num[0] : ''].filter(Boolean).join(' ');
+}
 
 export const DIALECTS = {
   fusha: 'فصحى',
@@ -25,25 +43,77 @@ export const DIALECTS = {
   english: 'English',
 };
 
-export const newSection = (type = 'verse', text = '') => ({
-  id: `sec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-  type,
-  text,
-});
-
 export const DEFAULT_LYRICS = {
   title: 'أغنية جديدة',
   topic: '',
   dialect: 'khaleeji',
   vocalTrackId: null,
-  sections: [newSection('madhhab', ''), newSection('verse', '')],
+  style: '',
+  text: '',
 };
 
+// تقسيم النص إلى أجزاء حسب الوسوم (حتى لو كانت الوسوم داخل الفقرة نفسها)
+export function parseLyrics(text) {
+  const parts = [];
+  const re = /\[([^\]\n]{1,40})\]/g;
+  let last = 0;
+  let currentTag = null;
+  let m;
+  const push = (tag, body) => {
+    const clean = body.trim();
+    if (tag === null && !clean) return;
+    parts.push({ tag, type: tag === null ? null : detectType(tag), body: clean });
+  };
+  while ((m = re.exec(text))) {
+    push(currentTag, text.slice(last, m.index));
+    currentTag = m[1].trim();
+    last = m.index + m[0].length;
+  }
+  push(currentTag, text.slice(last));
+  return parts;
+}
+
+export function serializeLyrics(parts) {
+  return parts
+    .map((p) => (p.tag ? `[${p.tag}]\n${p.body}` : p.body))
+    .join('\n\n')
+    .trim();
+}
+
+export const tagForType = (type, oldTag = '') => {
+  const suffix = oldTag ? tagSuffix(oldTag) : '';
+  return `${SECTION_TYPES[type].name}${suffix ? ` ${suffix}` : ''}`;
+};
+
+// تحويل الوسوم للإنجليزي لأن نماذج الغناء تفهمها أفضل
+export function lyricsForSinger(text) {
+  return serializeLyrics(
+    parseLyrics(text).filter((p) => p.body).map((p) => {
+      if (!p.tag) return p;
+      const suffix = tagSuffix(p.tag).replace('الأخير', 'Final').trim();
+      const base = SECTION_TYPES[p.type].lyria;
+      return { ...p, tag: suffix.startsWith('Final') ? `${suffix.replace(/\s*\d+/, '')} ${base}`.trim() : `${base}${suffix ? ` ${suffix}` : ''}` };
+    })
+  );
+}
+
+// ترحيل الصيغة القديمة (أقسام منفصلة) إلى نص واحد
+const LEGACY_NAMES = { intro: 'مقدمة', madhhab: 'المذهب', verse: 'كوبليه', chorus: 'كورس', bridge: 'جسر', outro: 'قفلة' };
 const STORAGE_KEY = 'ams_lyrics_v1';
 export function loadLyrics() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULT_LYRICS, ...JSON.parse(raw) };
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (Array.isArray(saved.sections) && typeof saved.text !== 'string') {
+        saved.text = saved.sections
+          .filter((s) => s.text.trim())
+          .map((s) => `[${LEGACY_NAMES[s.type] || 'كوبليه'}]\n${s.text.trim()}`)
+          .join('\n\n');
+        delete saved.sections;
+      }
+      return { ...DEFAULT_LYRICS, ...saved };
+    }
   } catch (e) { /* */ }
   return DEFAULT_LYRICS;
 }
@@ -104,7 +174,9 @@ export function syllabify(line) {
     .flatMap((w) => (ARABIC.test(w) ? syllabifyArabicWord(w) : syllabifyLatinWord(w)));
 }
 
-export const linesOf = (text) => text.split('\n').map((l) => l.trim()).filter(Boolean);
+// الأسطر: سطر جديد أو ".." أو "…" تعتبر فاصل أسطر
+export const linesOf = (text) =>
+  text.split(/\n|\s*\.{2,}\s*|\s*…\s*/).map((l) => l.trim()).filter(Boolean);
 
 // يوزع مقاطع السطر على مسار نغمي ابتداءً من خطوة معينة
 // إذا وُجدت نغمات في المسار يستخدمها بالترتيب، وإلا يضيف نغمات جديدة كل خطوتين
