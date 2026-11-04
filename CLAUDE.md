@@ -7,6 +7,9 @@ DAW مبسط بالعربية (RTL) مع مقامات شرقية، يعمل كت
 - `src/musicLibrary.js` — كل المقامات/السلالم (SCALES) والآلات (INSTRUMENT_PRESETS) وأصوات الإيقاع (DRUM_VOICES)، مقسمة حسب GROUPS (شرقي/غربي/لاتيني/عالمي). الإضافة هنا تظهر تلقائياً في الواجهة وفي قوائم Gemini.
   - آلة نغمية جديدة = عنصر مع `patch` (موجتان + فلتر + غلاف + اهتزاز). آلة إيقاع = عنصر مع `kit` (8 أصوات). الآلات الأصلية (oud, qanun, nay, strings, bass, synth) صوتها مبرمج يدوياً داخل `triggerInstrumentNote` في App.tsx.
 - `src/audioClips.js` + `src/AudioClipLane.jsx` — استيراد مقاطع صوتية كمسارات (`track.kind === 'audio'`, بياناتها في `track.clip`). الـ AudioBuffer محفوظ في `audioBuffersRef` (خارج الـ state). الواجهة RTL: الخطوة 0 على اليمين.
+- `src/vocalFx.js` — مؤثرات المقاطع (`clip.fx`): طبقة بدون تغيير السرعة (WSOLA + إعادة عيّنة، معالجة مسبقة ومخزنة في `entry.cache`)، EQ، ضاغط، تدبيل، إيكو، صدى قاعة، وقوالب جاهزة.
+- `src/recorder.js` — تسجيل المايك (MediaRecorder). صلاحية المايك فقط مسموحة في `electron/main.cjs`.
+- `src/lyrics.js` + `src/LyricsPanel.jsx` — تبويب الكلمات: أقسام، لهجات، تقطيع مقاطع تقريبي (أو يدوي بالشرطة)، وربط المقاطع بخطوات مسار الغناء (`track.lyrics` مصفوفة 32). الكلمات تنحفظ في localStorage. Gemini يكتب/يعدّل/يقترح قوافي/يلحّن سطراً عبر `askGeminiJSON` في App.tsx.
 - `src/apiKey.js` — جلب مفتاح Gemini (env → localStorage → نافذة إدخال). لا تستخدم `window.prompt` لأنه لا يعمل في Electron.
 - `electron/main.cjs` — نافذة التطبيق + التحديث التلقائي عبر `electron-updater` من GitHub Releases.
 - `.github/workflows/release.yml` — يبني مثبّت ويندوز عند دفع وسم `v*`.

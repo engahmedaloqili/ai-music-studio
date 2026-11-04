@@ -2,12 +2,16 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { getGeminiApiKey } from './apiKey';
 import { decodeAudioFile, newAudioTrack, playClip } from './audioClips';
 import AudioClipLane from './AudioClipLane';
+import LyricsPanel from './LyricsPanel';
+import { loadLyrics, saveLyrics, syllabify, placeSyllables, applyComposedLine } from './lyrics';
+import { startRecording } from './recorder';
+import { getProcessedBuffer } from './audioClips';
 import { SCALES, INSTRUMENT_PRESETS, GROUPS, playDrumVoice, isPercussion, scaleCatalogForAI, instrumentCatalogForAI } from './musicLibrary';
 import {
   Play, Pause, Square, Plus, Trash2, Volume2, VolumeX, Sliders,
   Sparkles, Wand2, Music, Code2, Layers, Check, Copy, RefreshCw,
   Scissors, Radio, Settings2, Activity, ChevronLeft, Disc, Cpu,
-  Mic2, Headphones, Gauge, HelpCircle, ArrowUpRight, Upload
+  Mic2, Headphones, Gauge, HelpCircle, ArrowUpRight, Upload, FileText, Circle
 } from 'lucide-react';
 
 
@@ -286,6 +290,21 @@ export default function App() {
   const activeClipSourcesRef = useRef(new Map());
   const fileInputRef = useRef(null);
   const [isImporting, setIsImporting] = useState(false);
+
+  // الكلمات (تنحفظ تلقائياً في التخزين المحلي)
+  const [lyrics, setLyrics] = useState(loadLyrics);
+  useEffect(() => { saveLyrics(lyrics); }, [lyrics]);
+
+  // التسجيل من المايكروفون
+  const recorderRef = useRef(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const [recordWithMusic, setRecordWithMusic] = useState(true);
+  useEffect(() => {
+    if (!isRecording) return;
+    const t = setInterval(() => setRecSeconds(recorderRef.current?.elapsed() || 0), 200);
+    return () => clearInterval(t);
+  }, [isRecording]);
 
   // مراجع أحدث الحالات لاستخدامها داخل المؤقت الصوتي دون تقطيع
   const tracksRef = useRef(tracks);
@@ -583,8 +602,111 @@ export default function App() {
   };
 
   const updateClip = (trackId, patch) => {
-    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, clip: { ...t.clip, ...patch } } : t)));
+    setTracks((prev) => prev.map((t) => {
+      if (t.id !== trackId) return t;
+      const clip = { ...t.clip, ...patch };
+      // تجهيز النسخة المعالجة (عكس / تغيير طبقة) مسبقاً حتى لا يتقطع التشغيل
+      if ('reverse' in patch || (patch.fx && patch.fx.pitch !== t.clip.fx?.pitch)) {
+        const entry = audioBuffersRef.current.get(trackId);
+        if (entry && audioCtxRef.current) setTimeout(() => getProcessedBuffer(audioCtxRef.current, entry, clip), 30);
+      }
+      return { ...t, clip };
+    }));
   };
+
+  // تسجيل صوتك (مع تشغيل الموسيقى من البداية اختيارياً)
+  const handleToggleRecording = async () => {
+    if (isRecording) {
+      const rec = recorderRef.current;
+      recorderRef.current = null;
+      setIsRecording(false);
+      if (recordWithMusic) setIsPlaying(false);
+      const blob = await rec.stop();
+      try {
+        const { buffer, peaks } = await decodeAudioFile(audioCtxRef.current, blob);
+        const id = `audio-${Date.now()}`;
+        audioBuffersRef.current.set(id, { buffer });
+        const count = tracksRef.current.filter((t) => t.kind === 'audio' && t.isRecording).length + 1;
+        const track = { ...newAudioTrack(id, `تسجيل صوتي ${count}`, buffer.duration, peaks, tracksRef.current.length), isRecording: true };
+        setTracks((prev) => [...prev, track]);
+        setSelectedTrackId(id);
+      } catch (e) {
+        alert('تعذر حفظ التسجيل. جرّب مرة ثانية.');
+      }
+      return;
+    }
+    initAudioEngine();
+    try {
+      recorderRef.current = await startRecording();
+    } catch (e) {
+      alert('ما قدرت أوصل للمايكروفون. تأكد إنه موصول، ومن إعدادات ويندوز: الخصوصية ← المايكروفون ← اسمح لتطبيقات سطح المكتب.');
+      return;
+    }
+    setRecSeconds(0);
+    setIsRecording(true);
+    if (recordWithMusic) {
+      setCurrentStep(31); // أول خطوة تُعزف = 0
+      setIsPlaying(true);
+    }
+  };
+
+  // ==========================================
+  // الكلمات: ربط الأسطر بمسار الغناء
+  // ==========================================
+  const askGeminiJSON = async (systemText, userText, schema) => {
+    const result = await callGeminiWithBackoff({
+      contents: [{ role: 'user', parts: [{ text: userText }] }],
+      systemInstruction: { parts: [{ text: systemText }] },
+      generationConfig: { responseMimeType: 'application/json', responseSchema: schema },
+    });
+    const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!raw) throw new Error('رد فارغ من Gemini');
+    return JSON.parse(raw);
+  };
+
+  const handleLinkLine = async (line, mode) => {
+    const track = tracksRef.current.find((t) => t.id === lyrics.vocalTrackId);
+    if (!track) throw new Error('اختر مسار الغناء أولاً');
+    const syllables = syllabify(line);
+    if (!syllables.length) throw new Error('السطر فارغ');
+    let result;
+    if (mode === 'ai') {
+      const available = 32 - regionStart;
+      const scale = SCALES[selectedScale];
+      const res = await askGeminiJSON(
+        `أنت ملحن عربي محترف. لحّن سطر الغناء على ${scale.name} (${scale.description}) بسرعة ${bpm} BPM.
+الدرجات من 1 إلى 8 هي درجات المقام (1 = القرار، 8 = الجواب). المتاح ${available} خطوة زمنية.
+قسّم السطر إلى مقاطع غنائية صحيحة النطق، وأعط لكل مقطع درجة (degree) وطولاً بالخطوات (length من 1 إلى 4)، ومجموع الأطوال لا يتجاوز ${available}.
+اجعل اللحن طبيعياً للغناء: حركة متدرجة، وإطالة المقاطع الممدودة ونهاية السطر، والقفلة على درجة مستقرة.`,
+        `السطر: ${line}\nتقطيع مقترح: ${syllables.join(' - ')}`,
+        {
+          type: 'OBJECT',
+          properties: {
+            items: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: { syllable: { type: 'STRING' }, degree: { type: 'INTEGER' }, length: { type: 'INTEGER' } },
+                required: ['syllable', 'degree', 'length'],
+              },
+            },
+          },
+          required: ['items'],
+        }
+      );
+      result = applyComposedLine(track, res.items, regionStart);
+      setTracks((prev) => prev.map((t) => (t.id === track.id ? { ...t, notes: result.notes, lyrics: result.lyrics } : t)));
+      return `🎵 لحّن Gemini السطر في ${res.items.length} مقطع ابتداءً من الخطوة ${regionStart + 1}.`;
+    }
+    result = placeSyllables(track, syllables, regionStart);
+    setTracks((prev) => prev.map((t) => (t.id === track.id ? { ...t, notes: result.notes, lyrics: result.lyrics } : t)));
+    return result.placed < result.total
+      ? `⚠️ انربط ${result.placed} من ${result.total} مقطع فقط (المساحة ما تكفي). قدّم بداية منطقة التعديل أو قصّر السطر.`
+      : `✅ انربط ${result.placed} مقطع بمسار «${track.name}» ابتداءً من الخطوة ${regionStart + 1}.`;
+  };
+
+  const handleClearTrackLyrics = (trackId) =>
+    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, lyrics: new Array(32).fill('') } : t)));
 
   // ==========================================
   // 5. حلقة التشغيل الزمني (Sequencer Loop) والراسم الطيفي
@@ -1122,6 +1244,17 @@ ${instrumentCatalogForAI()}
               <Code2 className="w-3.5 h-3.5" />
               <span>أكواد الباك إند (Python & Gemini)</span>
             </button>
+            <button
+              onClick={() => setActiveTab('lyrics')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                activeTab === 'lyrics'
+                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>الكلمات والغناء</span>
+            </button>
           </div>
         </div>
       </header>
@@ -1133,6 +1266,19 @@ ${instrumentCatalogForAI()}
         
         {/* القسم الأيمن/الأوسط: مساحة العمل حسب التبويب المختار (8 أعمدة) */}
         <div className="lg:col-span-8 flex flex-col gap-4">
+          {activeTab === 'lyrics' && (
+            <LyricsPanel
+              lyrics={lyrics}
+              setLyrics={setLyrics}
+              melodicTracks={tracks.filter((t) => t.kind !== 'audio' && !isPercussion(t.instrument))}
+              scaleName={SCALES[selectedScale]?.name}
+              bpm={bpm}
+              regionStart={regionStart}
+              askGemini={askGeminiJSON}
+              onLinkLine={handleLinkLine}
+              onClearTrackLyrics={handleClearTrackLyrics}
+            />
+          )}
           
           {activeTab === 'studio' && (
             <>
@@ -1198,6 +1344,25 @@ ${instrumentCatalogForAI()}
                         e.target.value = '';
                       }}
                     />
+                    <button
+                      onClick={handleToggleRecording}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-xs transition ${
+                        isRecording ? 'bg-rose-500 text-white animate-pulse' : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30'
+                      }`}
+                    >
+                      <Circle className={`w-3.5 h-3.5 ${isRecording ? 'fill-white' : 'fill-rose-400'}`} />
+                      <span>{isRecording ? `إيقاف التسجيل (${recSeconds.toFixed(1)} ث)` : 'تسجيل صوتي'}</span>
+                    </button>
+                    <label className="flex items-center gap-1 text-[11px] text-slate-400 cursor-pointer" title="تشغيل الموسيقى من البداية أثناء التسجيل (استخدم سماعات)">
+                      <input
+                        type="checkbox"
+                        checked={recordWithMusic}
+                        disabled={isRecording}
+                        onChange={(e) => setRecordWithMusic(e.target.checked)}
+                        className="accent-rose-500"
+                      />
+                      مع الموسيقى
+                    </label>
                   </div>
                 </div>
 
@@ -1272,6 +1437,29 @@ ${instrumentCatalogForAI()}
                     انقر على أي مربع لتعديل النغمة يدوياً (1-8 درجات السلم) — أو اسحب ملفاً صوتياً هنا لاستيراده
                   </span>
                 </div>
+
+                {(() => {
+                  const vt = tracks.find((t) => t.id === lyrics.vocalTrackId);
+                  const words = (vt?.lyrics || []).map((w, i) => ({ w, i })).filter((x) => x.w);
+                  if (!words.length) return null;
+                  let active = -1;
+                  words.forEach((x) => { if (x.i <= currentStep) active = x.i; });
+                  return (
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 bg-violet-500/5 border border-violet-500/20 rounded-xl px-4 py-2.5">
+                      <span className="text-[10px] text-violet-300 font-bold ml-2">🎤 {vt.name}:</span>
+                      {words.map((x) => (
+                        <span
+                          key={x.i}
+                          className={`text-base font-bold transition-colors ${
+                            isPlaying && x.i === active ? 'text-amber-300 scale-110' : isPlaying && x.i < active ? 'text-violet-200' : 'text-slate-400'
+                          }`}
+                        >
+                          {x.w}
+                        </span>
+                      ))}
+                    </div>
+                  );
+                })()}
 
                 <div
                   className="space-y-3 overflow-x-auto pb-2"
@@ -1488,6 +1676,11 @@ ${instrumentCatalogForAI()}
                                   }`}
                                   title={`خطوة ${stepIdx + 1} | نغمة: ${noteVal}`}
                                 >
+                                  {track.lyrics?.[stepIdx] && (
+                                    <span className="absolute top-1 inset-x-0 text-center text-[10px] font-bold text-violet-200 leading-none truncate px-0.5 z-10 pointer-events-none">
+                                      {track.lyrics[stepIdx]}
+                                    </span>
+                                  )}
                                   {/* شريط التعديل الجزئي العلوي */}
                                   {isInRegion && (
                                     <span className="absolute top-0 inset-x-0 h-1 bg-amber-400/80 rounded-t-sm" />

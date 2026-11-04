@@ -2,6 +2,15 @@
 const { app, BrowserWindow, shell, dialog } = require('electron');
 const path = require('path');
 
+// السماح بالمايكروفون فقط (للتسجيل الصوتي) ورفض أي صلاحيات أخرى
+function setupPermissions() {
+  const { session } = require('electron');
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    const audioOnly = permission === 'media' && (!details.mediaTypes || details.mediaTypes.every((t) => t === 'audio'));
+    callback(audioOnly);
+  });
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1440,
@@ -48,6 +57,7 @@ function setupAutoUpdate() {
 }
 
 app.whenReady().then(() => {
+  setupPermissions();
   createWindow();
   setupAutoUpdate();
   app.on('activate', () => {

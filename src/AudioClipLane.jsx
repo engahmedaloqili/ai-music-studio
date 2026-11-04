@@ -1,5 +1,6 @@
 import React, { useRef } from 'react';
-import { Play, Scissors, Repeat, FlipHorizontal } from 'lucide-react';
+import { Play, Scissors, Repeat, FlipHorizontal, Mic2 } from 'lucide-react';
+import { VOCAL_PRESETS, withDefaultFx } from './vocalFx';
 
 // مسار مقطع صوتي: شكل الموجة على الخط الزمني (32 خطوة) + أدوات القص والتعديل
 // الواجهة RTL، لذلك الخطوة 0 على اليمين والزمن يمشي من اليمين لليسار.
@@ -76,6 +77,12 @@ export default function AudioClipLane({
   };
 
   const maxLen = Math.max(0.05, clip.duration - clip.trimStart);
+  const fx = withDefaultFx(clip.fx);
+  const setFx = (patch) => onClipChange({ fx: { ...fx, ...patch } });
+  const toggleCls = (on, color) =>
+    `px-2.5 py-1 rounded-md text-[11px] font-bold border transition ${
+      on ? `${color} text-slate-950 border-transparent` : 'bg-slate-800 text-slate-300 border-slate-700'
+    }`;
 
   return (
     <div className="flex-1 min-w-[640px] flex flex-col gap-2">
@@ -236,7 +243,7 @@ export default function AudioClipLane({
               <Scissors className="w-3 h-3" /> ضبط على منطقة التعديل
             </button>
             <button
-              onClick={() => onClipChange({ trimStart: 0, length: clip.duration, rate: 1, reverse: false, loop: false, fadeIn: 0.01, fadeOut: 0.05 })}
+              onClick={() => onClipChange({ trimStart: 0, length: clip.duration, rate: 1, reverse: false, loop: false, fadeIn: 0.01, fadeOut: 0.05, fx: withDefaultFx(null) })}
               className="px-2.5 py-1 rounded-md bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700 text-[11px]"
             >
               إرجاع الأصل
@@ -244,6 +251,57 @@ export default function AudioClipLane({
             <span className="text-[10px] text-slate-500 mr-auto">
               مدة الملف: {fmt(clip.duration)} — اسحب المقطع لتحريكه
             </span>
+          </div>
+
+          {/* مؤثرات الصوت والغناء */}
+          <div className="col-span-2 md:col-span-5 border-t border-slate-800 pt-2.5 space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex items-center gap-1 text-[11px] font-bold text-violet-300">
+                <Mic2 className="w-3.5 h-3.5" /> مؤثرات الصوت والغناء
+              </span>
+              <select
+                value=""
+                onChange={(e) => e.target.value && onClipChange({ fx: JSON.parse(JSON.stringify(VOCAL_PRESETS[e.target.value].fx)) })}
+                className="bg-slate-900 text-[11px] text-slate-200 border border-slate-700 rounded-md px-2 py-1"
+              >
+                <option value="">قوالب جاهزة...</option>
+                {Object.entries(VOCAL_PRESETS).map(([k, v]) => (
+                  <option key={k} value={k}>{v.name}</option>
+                ))}
+              </select>
+              <button onClick={() => setFx({ comp: !fx.comp })} className={toggleCls(fx.comp, 'bg-sky-400')}>ضاغط (Compressor)</button>
+              <button onClick={() => setFx({ double: !fx.double })} className={toggleCls(fx.double, 'bg-fuchsia-400')}>تدبيل الصوت</button>
+              <button onClick={() => setFx({ echo: { ...fx.echo, on: !fx.echo.on } })} className={toggleCls(fx.echo.on, 'bg-amber-400')}>إيكو</button>
+              <button onClick={() => setFx({ reverb: { ...fx.reverb, on: !fx.reverb.on } })} className={toggleCls(fx.reverb.on, 'bg-emerald-400')}>صدى قاعة</button>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <Slider
+                label="طبقة الصوت (بدون تغيير السرعة)"
+                value={fx.pitch}
+                min={-12}
+                max={12}
+                step={1}
+                display={`${fx.pitch > 0 ? '+' : ''}${fx.pitch} نصف تون`}
+                onChange={(v) => setFx({ pitch: v })}
+                accent="accent-violet-500"
+              />
+              <Slider label="الباص (دفء)" value={fx.eq.low} min={-12} max={12} step={1} display={`${fx.eq.low} dB`} onChange={(v) => setFx({ eq: { ...fx.eq, low: v } })} />
+              <Slider label="الوضوح (Presence)" value={fx.eq.presence} min={-12} max={12} step={1} display={`${fx.eq.presence} dB`} onChange={(v) => setFx({ eq: { ...fx.eq, presence: v } })} />
+              <Slider label="اللمعة (Air)" value={fx.eq.air} min={-12} max={12} step={1} display={`${fx.eq.air} dB`} onChange={(v) => setFx({ eq: { ...fx.eq, air: v } })} />
+              {fx.echo.on && (
+                <>
+                  <Slider label="زمن الإيكو" value={fx.echo.time} min={0.05} max={1.2} step={0.01} display={fmt(fx.echo.time)} onChange={(v) => setFx({ echo: { ...fx.echo, time: v } })} accent="accent-amber-500" />
+                  <Slider label="تكرار الإيكو" value={fx.echo.feedback} min={0} max={0.85} step={0.01} display={`${Math.round(fx.echo.feedback * 100)}%`} onChange={(v) => setFx({ echo: { ...fx.echo, feedback: v } })} accent="accent-amber-500" />
+                  <Slider label="كمية الإيكو" value={fx.echo.mix} min={0} max={1} step={0.01} display={`${Math.round(fx.echo.mix * 100)}%`} onChange={(v) => setFx({ echo: { ...fx.echo, mix: v } })} accent="accent-amber-500" />
+                </>
+              )}
+              {fx.reverb.on && (
+                <>
+                  <Slider label="حجم القاعة" value={fx.reverb.size} min={0.5} max={5} step={0.1} display={fmt(fx.reverb.size)} onChange={(v) => setFx({ reverb: { ...fx.reverb, size: v } })} accent="accent-emerald-500" />
+                  <Slider label="كمية الصدى" value={fx.reverb.mix} min={0} max={1} step={0.01} display={`${Math.round(fx.reverb.mix * 100)}%`} onChange={(v) => setFx({ reverb: { ...fx.reverb, mix: v } })} accent="accent-emerald-500" />
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
